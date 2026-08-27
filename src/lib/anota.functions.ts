@@ -468,13 +468,26 @@ function extractItems(o: JsonRecord): ParsedItem[] {
   const out: ParsedItem[] = [];
   const seen = new Map<string, number>();
 
-  function accum(ref: string, nome: string | null, qtd: number): void {
-    const idx = seen.get(ref);
+  function accum(item: ParsedItem): void {
+    const idx = seen.get(item.ref);
     if (idx !== undefined) {
-      out[idx] = { ref, nome, quantidade: out[idx].quantidade + qtd };
+      const current = out[idx];
+      out[idx] = {
+        ...current,
+        nome: current.nome ?? item.nome,
+        quantidade: current.quantidade + item.quantidade,
+        isCombo: current.isCombo || item.isCombo,
+        comboRef: current.comboRef ?? item.comboRef ?? null,
+      };
     } else {
-      seen.set(ref, out.length);
-      out.push({ ref, nome, quantidade: qtd });
+      seen.set(item.ref, out.length);
+      out.push({
+        ref: item.ref,
+        nome: item.nome,
+        quantidade: item.quantidade,
+        isCombo: item.isCombo,
+        comboRef: item.comboRef ?? null,
+      });
     }
   }
 
@@ -482,7 +495,7 @@ function extractItems(o: JsonRecord): ParsedItem[] {
     if (Array.isArray(value)) {
       for (const el of value) {
         const items = extractItem(el);
-        for (const item of items) accum(item.ref, item.nome, item.quantidade);
+        for (const item of items) accum(item);
         const obj = asRecord(el);
         if (obj) {
           const hasContainer = CONTAINER_FIELDS.some(
