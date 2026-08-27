@@ -218,6 +218,17 @@ function AnotaPage() {
     },
   });
 
+  const { data: productMap = [] } = useQuery({
+    queryKey: ["anota-product-map"],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from("anota_product_map")
+        .select("anota_item_ref, nome, product_id");
+      if (error) throw error;
+      return data;
+    },
+  });
+
   const { data: comboMap = [] } = useQuery({
     queryKey: ["anota-combo-map"],
     queryFn: async () => {
@@ -470,20 +481,22 @@ function AnotaPage() {
         is_combo: boolean;
       }
     >();
+    const savedMap = new Map(productMap.map((entry: any) => [entry.anota_item_ref, entry]));
     for (const it of items) {
       const ref = it.anota_item_ref;
+      const saved = savedMap.get(ref);
       if (!ref) continue;
       const isCombo = !!it.is_combo || /^combo\s/i.test(it.nome ?? "");
       const cur = map.get(ref);
       if (cur) {
         cur.count++;
-        if (!cur.product_id && it.product_id) cur.product_id = it.product_id;
+        if (!cur.product_id && (it.product_id || saved?.product_id)) cur.product_id = it.product_id || saved?.product_id;
         cur.is_combo = cur.is_combo || isCombo;
       } else {
         map.set(ref, {
           ref,
           nome: it.nome,
-          product_id: it.product_id,
+          product_id: it.product_id || saved?.product_id || null,
           count: 1,
           is_combo: isCombo,
         });
@@ -492,7 +505,7 @@ function AnotaPage() {
     return Array.from(map.values()).sort((a, b) =>
       (a.nome ?? a.ref).localeCompare(b.nome ?? b.ref),
     );
-  }, [items]);
+  }, [items, productMap]);
 
   // Composição configurada por combo: ref -> produtos com quantidade
   const comboByRef = useMemo(() => {
@@ -566,20 +579,45 @@ function AnotaPage() {
     mutationFn: async () => {
       if (!selectedOrderId) throw new Error("Nenhum pedido selecionado.");
       const validItems = orderDraft.filter((item) => item.nome?.trim() && Number(item.quantidade) > 0);
-      const { error: deleteError } = await supabase.from("anota_order_items").delete().eq("order_id", selectedOrderId);
-      if (deleteError) throw deleteError;
-      if (validItems.length) {
-        const { error } = await supabase.from("anota_order_items").insert(validItems.map((item) => ({
+      const originalIds = new Set(orderItems.map((item: any) => item.id));
+      const draftIds = new Set(validItems.map((item) => item.id).filter(Boolean));
+      const removedIds = [...originalIds].filter((id) => !draftIds.has(id));
+
+      if (removedIds.length) {
+        const { error } = await supabase.from("anota_order_items").delete().in("id", removedIds);
+        if (error) throw error;
+      }
+
+      for (const item of validItems) {
+        const payload = {
           order_id: selectedOrderId,
-          anota_item_ref: item.anota_item_ref || item.nome.trim().toLowerCase().replace(/\\s+/g, "-"),
+          anota_item_ref: item.anota_item_ref || slugify(item.nome),
           nome: item.nome.trim(),
           quantidade: Number(item.quantidade),
           product_id: item.is_combo ? null : item.product_id || null,
           mapeado: item.is_combo ? false : !!item.product_id,
           is_combo: !!item.is_combo,
           combo_ref: item.combo_ref || null,
-        })));
+        };
+        const query = item.id
+          ? supabase.from("anota_order_items").update(payload).eq("id", item.id)
+          : supabase.from("anota_order_items").insert(payload);
+        const { error } = await query;
         if (error) throw error;
+      }
+
+      const mappings = Array.from(new Map(
+        validItems
+          .filter((item) => !item.is_combo && item.anota_item_ref)
+          .map((item) => [item.anota_item_ref, {
+            anota_item_ref: item.anota_item_ref,
+            nome: item.nome.trim(),
+            product_id: item.product_id || null,
+          }]),
+      ).values());
+      if (mappings.length) {
+        const result = await saveMapFn({ data: { mappings } });
+        if (!result.ok) throw new Error(result.message);
       }
     },
     onSuccess: () => {
@@ -1714,6 +1752,7 @@ function AnotaPage() {
                     <thead className="bg-muted/50 text-left text-xs uppercase tracking-wide text-muted-foreground">
                       <tr>
                         <th className="px-3 py-2">Item</th>
+                        <th className="px-3 py-2">Produto / tipo</th>
                         <th className="px-3 py-2 text-right">Qtd</th>
                         <th className="px-3 py-2 text-right">Ações</th>
                       </tr>
@@ -1730,6 +1769,23 @@ function AnotaPage() {
                             />
                             {it.is_combo && <Badge variant="secondary" className="ml-2">Combo</Badge>}
                             {it.combo_ref && <span className="ml-2 text-xs text-muted-foreground">Item do combo</span>}
+                          </td>
+                          <td className="px-3 py-2">
+                            <Select
+                              value={it.is_combo ? "combo" : it.product_id ?? "none"}
+                              onValueChange={(value) => setOrderDraft((draft) => draft.map((row, index) => index === i ? { ...row, is_combo: value === "combo", product_id: value === "combo" || value === "none" ? null : value, mapeado: value !== "none" && value !== "combo" } : row))}
+                            >
+                              <SelectTrigger className="h-8 w-56">
+                                <SelectValue placeholder="Mapear produto" />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="none">Não mapeado</SelectItem>
+                                <SelectItem value="combo">Combo</SelectItem>
+                                {products.map((product) => (
+                                  <SelectItem key={product.id} value={product.id}>{product.nome}</SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
                           </td>
                           <td className="px-3 py-2 text-right tabular-nums">
                             <Input
