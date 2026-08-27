@@ -548,13 +548,47 @@ function AnotaPage() {
       if (!selectedOrderId) return [];
       const { data, error } = await supabase
         .from("anota_order_items")
-        .select("nome, quantidade, mapeado")
+        .select("id, anota_item_ref, nome, quantidade, mapeado, product_id, is_combo, combo_ref")
         .eq("order_id", selectedOrderId)
         .order("nome");
       if (error) throw error;
       return data;
     },
     enabled: !!selectedOrderId,
+  });
+
+  const [orderDraft, setOrderDraft] = useState<any[]>([]);
+  useEffect(() => {
+    setOrderDraft(orderItems.map((item: any) => ({ ...item })));
+  }, [orderItems]);
+
+  const saveOrderItems = useMutation({
+    mutationFn: async () => {
+      if (!selectedOrderId) throw new Error("Nenhum pedido selecionado.");
+      const validItems = orderDraft.filter((item) => item.nome?.trim() && Number(item.quantidade) > 0);
+      const { error: deleteError } = await supabase.from("anota_order_items").delete().eq("order_id", selectedOrderId);
+      if (deleteError) throw deleteError;
+      if (validItems.length) {
+        const { error } = await supabase.from("anota_order_items").insert(validItems.map((item) => ({
+          order_id: selectedOrderId,
+          anota_item_ref: item.anota_item_ref || item.nome.trim().toLowerCase().replace(/\\s+/g, "-"),
+          nome: item.nome.trim(),
+          quantidade: Number(item.quantidade),
+          product_id: item.is_combo ? null : item.product_id || null,
+          mapeado: item.is_combo ? false : !!item.product_id,
+          is_combo: !!item.is_combo,
+          combo_ref: item.combo_ref || null,
+        })));
+        if (error) throw error;
+      }
+    },
+    onSuccess: () => {
+      toast.success("Itens do pedido atualizados.");
+      qc.invalidateQueries({ queryKey: ["anota-order-items", selectedOrderId] });
+      qc.invalidateQueries({ queryKey: ["anota-items"] });
+      qc.invalidateQueries({ queryKey: ["anota-orders"] });
+    },
+    onError: (error: Error) => toast.error(`Não foi possível salvar os itens: ${error.message}`),
   });
 
   const selectedOrder = orders.find((o) => o.id === selectedOrderId);
@@ -1681,18 +1715,72 @@ function AnotaPage() {
                       <tr>
                         <th className="px-3 py-2">Item</th>
                         <th className="px-3 py-2 text-right">Qtd</th>
+                        <th className="px-3 py-2 text-right">Ações</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-border">
-                      {orderItems.map((it, i) => (
-                        <tr key={i}>
-                          <td className="px-3 py-2">{it.nome ?? "—"}</td>
-                          <td className="px-3 py-2 text-right tabular-nums">{it.quantidade}</td>
+                      {orderDraft.map((it, i) => (
+                        <tr key={it.id ?? i}>
+                          <td className="px-3 py-2">
+                            <Input
+                              value={it.nome ?? ""}
+                              onChange={(e) => setOrderDraft((draft) => draft.map((row, index) => index === i ? { ...row, nome: e.target.value } : row))}
+                              className="h-8 min-w-40"
+                              aria-label="Nome do item"
+                            />
+                            {it.is_combo && <Badge variant="secondary" className="ml-2">Combo</Badge>}
+                            {it.combo_ref && <span className="ml-2 text-xs text-muted-foreground">Item do combo</span>}
+                          </td>
+                          <td className="px-3 py-2 text-right tabular-nums">
+                            <Input
+                              type="number"
+                              min="0.01"
+                              step="0.01"
+                              value={it.quantidade ?? ""}
+                              onChange={(e) => setOrderDraft((draft) => draft.map((row, index) => index === i ? { ...row, quantidade: e.target.value } : row))}
+                              className="h-8 w-20"
+                              aria-label="Quantidade do item"
+                            />
+                          </td>
+                          <td className="px-3 py-2 text-right">
+                            <div className="flex justify-end gap-1">
+                            <Button
+                              size="icon"
+                              variant="ghost"
+                              title="Excluir item"
+                              aria-label="Excluir item"
+                              onClick={() => setOrderDraft((draft) => draft.filter((_, index) => index !== i))}
+                            >
+                              <Trash2 className="size-4 text-destructive" />
+                            </Button>
+                            {(it.is_combo || comboByRef.has(it.anota_item_ref ?? "")) && it.anota_item_ref ? (
+                              <Button size="sm" variant="outline" onClick={() => openComboEditor(it.anota_item_ref)}>
+                                <Link2 className="mr-1 size-3" />
+                                {comboByRef.has(it.anota_item_ref) ? "Editar combo" : "Mapear combo"}
+                              </Button>
+                            ) : (
+                              <span className="text-xs text-muted-foreground">—</span>
+                            )}
+                            </div>
+                          </td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
                 )}
+                <div className="mt-3 flex flex-wrap justify-between gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setOrderDraft((draft) => [...draft, { nome: "", quantidade: 1, product_id: null, is_combo: false, combo_ref: null }])}
+                  >
+                    <Plus className="mr-1 size-4" /> Adicionar item
+                  </Button>
+                  <Button size="sm" onClick={() => saveOrderItems.mutate()} disabled={saveOrderItems.isPending}>
+                    {saveOrderItems.isPending && <Loader2 className="mr-1 size-4 animate-spin" />}
+                    Salvar itens
+                  </Button>
+                </div>
               </div>
 
               <div className="space-y-3 border-t pt-3">
